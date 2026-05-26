@@ -1,4 +1,3 @@
-shinyApp(ui = ui, server = server)
 library(shiny)
 library(bslib)
 library(tidyverse)
