@@ -1,63 +1,56 @@
 library(shiny)
 library(bslib)
 library(tidyverse)
-library(plotly) # Added for interactive scatter plots
 library(DT)
 library(janitor)
 library(lubridate)
-library(stringr)
-
-
 
 # Load data
 blood_raw <- read.csv("blood_donation.csv")
 
 # Clean and transform the dataset
 blood_clean <- blood_raw %>% 
-  # Standardize all column names to snake_case first to avoid manual renaming
   janitor::clean_names() %>%
-  
-  # Ensure dates are properly formatted
   mutate(
     last_donation_date = as.Date(last_donation_date),
-    registration_date = as.Date(registration_date)
-  ) %>%
-  
-  # Create age groups for the demographic pyramid
-  mutate(
+    registration_date = as.Date(registration_date),
+    
+    # Calculate exact duration
+    days_since_last_donation = as.numeric(difftime(Sys.Date(), last_donation_date, units = "days")),
+    
+    # Create generalized categories for duration
+    duration_category = case_when(
+      is.na(days_since_last_donation) ~ "Unknown / Never Donated",
+      days_since_last_donation <= 90 ~ "0-90 Days",
+      days_since_last_donation <= 180 ~ "91-180 Days",
+      days_since_last_donation <= 365 ~ "181-365 Days",
+      TRUE ~ "> 365 Days"
+    ),
+    
     age_group = cut(
       age, 
       breaks = c(-Inf, 19, seq(24, 64, by = 5), Inf), 
       labels = c("<20", "20-24", "25-29", "30-34", "35-39", "40-44", "45-49", "50-54", "55-59", "60-64", "65+"),
       right = TRUE
-    )
-  ) %>%
-  
-  # Determine eligibility
-  mutate(
+    ),
+    
     eligible_for_donation = case_when(
       age > 18 & age < 60 &
         (is.na(medical_condition) | medical_condition %in% c("", "None")) &
-        (is.na(last_donation_date) | last_donation_date <= Sys.Date() - days(90)) & # days(90) is safer date math
+        (is.na(last_donation_date) | last_donation_date <= Sys.Date() - days(90)) & 
         weight_kg > 50 &
-        (
-          (gender == "Male" & hemoglobin_g_d_l > 14) |
-            (gender == "Female" & hemoglobin_g_d_l > 12)
-        ) ~ TRUE,
+        ((gender == "Male" & hemoglobin_g_d_l > 14) | (gender == "Female" & hemoglobin_g_d_l > 12)) ~ TRUE,
       TRUE ~ FALSE
     )
-  )
+  ) %>%
+  # Rename column as requested
+  rename(last_donation_center = donation_center)
 
-# Calculate key completeness based on the newly cleaned names
-key_cols <- c("donor_id", "full_name", "gender", "age", "blood_group", 
-              "contact_number", "email", "city", "state", "country", 
-              "last_donation_date", "total_donations", "eligible_for_donation", 
-              "medical_condition", "weight_kg", "hemoglobin_g_d_l", 
-              "donation_center", "registration_date")
-
-blood_clean <- blood_clean %>%
-  mutate(key_completeness = rowSums(!is.na(select(., all_of(key_cols)))) / length(key_cols))
-
+# Extract unique choices for UI
+blood_groups <- unique(blood_clean$blood_group[!is.na(blood_clean$blood_group)])
+cities <- unique(blood_clean$city[!is.na(blood_clean$city)])
+duration_cats <- c("0-90 Days", "91-180 Days", "181-365 Days", "> 365 Days", "Unknown / Never Donated")
+age_range <- range(blood_clean$age, na.rm = TRUE)
 
 
 ui <- page_sidebar(
@@ -66,12 +59,23 @@ ui <- page_sidebar(
   
   sidebar = sidebar(
     title = "Global Filters",
-    selectInput("blood_group", "Blood Group", 
-                choices = c("All", unique(blood_clean$blood_group)), 
-                selected = "All"),
-    selectInput("city", "City", 
-                choices = c("All", unique(blood_clean$city)), 
-                selected = "All")
+    
+    # Checkbox groups for easy, single-click multiple selections
+    checkboxGroupInput("blood_group", "Blood Group", 
+                       choices = blood_groups, 
+                       selected = blood_groups),
+    
+    checkboxGroupInput("city", "City", 
+                       choices = cities, 
+                       selected = cities),
+    
+    checkboxGroupInput("duration_cat", "Time Since Last Donation",
+                       choices = duration_cats,
+                       selected = duration_cats),
+    
+    # Age Slider remains the same
+    sliderInput("age", "Age Range", 
+                min = age_range[1], max = age_range[2], value = age_range)
   ),
   
   layout_columns(
@@ -81,8 +85,13 @@ ui <- page_sidebar(
       plotOutput("pyramid_plot")
     ),
     card(
-      card_header("Donor Health & Center Landscape"),
-      plotlyOutput("donor_scatter") # Replaced leafletOutput
+      card_header(
+        div(class = "d-flex justify-content-between align-items-center",
+            "Center Eligibility Density (Ring)",
+            selectInput("donut_center", NULL, choices = c("All Centers" = "All", unique(blood_clean$last_donation_center)), width = "150px")
+        )
+      ),
+      plotOutput("donut_chart")
     ),
     card(
       card_header("Filtered Donor Database"),
@@ -93,19 +102,22 @@ ui <- page_sidebar(
 
 server <- function(input, output, session) {
   
-  # 1. Reactive Data Filter
+  # 1. Cleaned up Reactive Filter Logic
   filtered_data <- reactive({
-    data <- blood_clean
-    if (input$blood_group != "All") {
-      data <- data %>% filter(blood_group == input$blood_group)
-    }
-    if (input$city != "All") {
-      data <- data %>% filter(city == input$city)
-    }
-    data
+    # We require inputs to be present before filtering to avoid transient errors during app load
+    # If a user unchecks ALL boxes in a category, the charts will temporarily clear out safely
+    req(input$blood_group, input$city, input$duration_cat, input$age)
+    
+    blood_clean %>%
+      filter(
+        blood_group %in% input$blood_group,
+        city %in% input$city,
+        duration_category %in% input$duration_cat,
+        age >= input$age[1] & age <= input$age[2]
+      )
   })
   
-  # 2. Demographic Pyramid Plot (Unchanged)
+  # 2. Demographic Pyramid Plot 
   output$pyramid_plot <- renderPlot({
     req(nrow(filtered_data()) > 0)
     
@@ -133,47 +145,45 @@ server <- function(input, output, session) {
       labs(x = "Age Group", y = "Number of Donors (Solid = Eligible, Faded = Total)")
   })
   
-  # 3. Interactive Scatter Plot 
-  output$donor_scatter <- renderPlotly({
-    req(nrow(filtered_data()) > 0)
+  # 3. Eligible vs Ineligible Ring Display
+  output$donut_chart <- renderPlot({
+    d <- filtered_data() 
     
-    # Create a ggplot with custom text mapping for the Plotly tooltip
-    p <- ggplot(filtered_data(), aes(
-      x = age, 
-      y = hemoglobin_g_d_l, 
-      color = donation_center,
-      size = total_donations,
-      # The 'text' aesthetic creates a custom HTML tooltip
-      text = paste0(
-        "<b>Name:</b> ", full_name, "<br>",
-        "<b>ID:</b> ", donor_id, "<br>",
-        "<b>City:</b> ", city, "<br>",
-        "<b>Center:</b> ", donation_center, "<br>",
-        "<b>Eligibility:</b> ", ifelse(eligible_for_donation, "Eligible", "Not Eligible"), "<br>",
-        "<b>Total Donations:</b> ", total_donations
+    if (input$donut_center != "All") {
+      d <- d %>% filter(last_donation_center == input$donut_center)
+    }
+    
+    req(nrow(d) > 0)
+    
+    donut_data <- d %>%
+      count(eligible_for_donation) %>%
+      mutate(
+        status = ifelse(eligible_for_donation, "Eligible", "Ineligible"),
+        fraction = n / sum(n),
+        ymax = cumsum(fraction),
+        ymin = c(0, head(ymax, n = -1)),
+        label_pos = (ymax + ymin) / 2
       )
-    )) +
-      # Use jitter to prevent overplotting if multiple donors share exact age/hemoglobin
-      geom_jitter(alpha = 0.7, width = 0.5, height = 0.2) +
-      scale_size_continuous(range = c(2, 8)) + # Control dot size scaling
-      theme_minimal() +
-      labs(
-        x = "Age",
-        y = "Hemoglobin (g/dL)",
-        color = "Donation Center"
-      ) +
-      theme(legend.position = "right")
     
-    # Convert ggplot to an interactive plotly object, specifying 'text' for the tooltip
-    ggplotly(p, tooltip = "text") %>%
-      layout(hoverlabel = list(bgcolor = "white", font = list(family = "Arial")))
+    ggplot(donut_data, aes(ymax = ymax, ymin = ymin, xmax = 4, xmin = 3, fill = status)) +
+      geom_rect(color = "white", linewidth = 1) +
+      geom_text(aes(x = 3.5, y = label_pos, label = paste0(round(fraction * 100, 1), "%")), 
+                color = "white", size = 5, fontface = "bold") +
+      coord_polar(theta = "y") +
+      xlim(c(2, 4)) +
+      theme_void() +
+      scale_fill_manual(values = c("Eligible" = "#27ae60", "Ineligible" = "#95a5a6")) +
+      labs(fill = "Donation Status") +
+      annotate("text", x = 2, y = 0, label = paste("Total Donors:\n", sum(donut_data$n)), 
+               size = 5, fontface = "bold", color = "#2c3e50")
   })
   
-  # 4. Data Table (Unchanged)
+  # 4. Data Table
   output$donor_table <- renderDT({
     datatable(
       filtered_data() %>% 
-        select(donor_id, full_name, age, gender, blood_group, city, eligible_for_donation, donation_center),
+        select(donor_id, full_name, age, gender, blood_group, city, 
+               duration_category, eligible_for_donation, last_donation_center),
       options = list(pageLength = 10, scrollX = TRUE),
       rownames = FALSE,
       class = "display nowrap"
