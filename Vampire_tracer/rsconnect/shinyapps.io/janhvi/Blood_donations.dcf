@@ -1,0 +1,12 @@
+name: Blood_donations
+title: Blood_donations
+username: janhvi
+account: janhvi
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 17559960
+bundleId: 12190495
+url: https://janhvi.shinyapps.io/Blood_donations/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
