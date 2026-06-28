@@ -1,9 +1,10 @@
-library(shiny)
-library(bslib)
-library(tidyverse)
-library(DT)
-library(janitor)
-library(lubridate)
+install.packages("pacman")
+pacman::p_load(shiny,
+               bslib,
+               tidyverse,
+               DT,
+               janitor)
+
 
 # Load data
 blood_raw <- read.csv("blood_donation.csv")
